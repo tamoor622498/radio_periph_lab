@@ -107,6 +107,27 @@ architecture arch_imp of full_radio_v1_0_S00_AXI is
 	constant OPT_MEM_ADDR_BITS : integer := 1;
 	------------------------------------------------
 	---- Signals for user logic register space example
+	signal adc_tdata : std_logic_vector(15 downto 0);
+	signal adc_tdata_concat : std_logic_vector(31 downto 0);
+	signal adc_tvalid : std_logic;
+	
+	signal tuner_tdata : std_logic_vector(31 downto 0);
+	signal tuner_tvalid : std_logic;
+	
+	signal mult_tdata : std_logic_vector(63 downto 0);
+	signal mult_tvalid : std_logic;
+	
+	signal fir0_tdata : std_logic_vector(63 downto 0);
+	signal fir0_tvalid : std_logic;
+	signal fir0_tready : std_logic;
+	
+	signal fir1_tdata : std_logic_vector(31 downto 0);
+	signal fir1_tvalid : std_logic;
+	signal fir1_tready : std_logic;
+	
+	signal timer_cnt : unsigned(31 downto 0) := (others => '0');
+	
+	signal dds_reset : std_logic;
 	--------------------------------------------------
 	---- Number of Slave Registers 4
 	signal slv_reg0	:std_logic_vector(C_S_AXI_DATA_WIDTH-1 downto 0);
@@ -126,9 +147,57 @@ COMPONENT dds_compiler_0
     s_axis_phase_tvalid : IN STD_LOGIC;
     s_axis_phase_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
     m_axis_data_tvalid : OUT STD_LOGIC;
+    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(15 DOWNTO 0)
+  );
+    END COMPONENT;
+    
+COMPONENT dds_compiler_1
+  PORT (
+    aclk : IN STD_LOGIC;
+    aresetn : IN STD_LOGIC;
+    s_axis_phase_tvalid : IN STD_LOGIC;
+    s_axis_phase_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    m_axis_data_tvalid : OUT STD_LOGIC;
     m_axis_data_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
   );
     END COMPONENT;
+    
+COMPONENT cmpy_0
+  PORT (
+    aclk : IN STD_LOGIC;
+    aresetn : IN STD_LOGIC;
+    s_axis_a_tvalid : IN STD_LOGIC;
+    s_axis_a_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    s_axis_b_tvalid : IN STD_LOGIC;
+    s_axis_b_tdata : IN STD_LOGIC_VECTOR(31 DOWNTO 0);
+    m_axis_dout_tvalid : OUT STD_LOGIC;
+    m_axis_dout_tdata : OUT STD_LOGIC_VECTOR(63 DOWNTO 0)
+  );
+    END COMPONENT;
+    
+COMPONENT filter_1
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_data_tvalid : IN STD_LOGIC;
+    s_axis_data_tready : OUT STD_LOGIC;
+    s_axis_data_tdata : IN STD_LOGIC_VECTOR(63 DOWNTO 0);
+    m_axis_data_tvalid : OUT STD_LOGIC;
+    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(63 DOWNTO 0)
+  );
+    END COMPONENT;
+    
+COMPONENT filter_2
+  PORT (
+    aclk : IN STD_LOGIC;
+    s_axis_data_tvalid : IN STD_LOGIC;
+    s_axis_data_tready : OUT STD_LOGIC;
+    s_axis_data_tdata : IN STD_LOGIC_VECTOR(63 DOWNTO 0);
+    m_axis_data_tvalid : OUT STD_LOGIC;
+    m_axis_data_tdata : OUT STD_LOGIC_VECTOR(31 DOWNTO 0)
+  );
+    END COMPONENT;
+    
+    
 
 begin
 	-- I/O Connections assignments
@@ -367,11 +436,11 @@ begin
 	      when b"00" =>
 	        reg_data_out <= slv_reg0;
 	      when b"01" =>
-	        reg_data_out <= x"DEADBEEF";
+	        reg_data_out <= slv_reg1;
 	      when b"10" =>
 	        reg_data_out <= slv_reg2;
 	      when b"11" =>
-	        reg_data_out <= slv_reg3;
+	        reg_data_out <= std_logic_vector(timer_cnt);
 	      when others =>
 	        reg_data_out  <= (others => '0');
 	    end case;
@@ -397,16 +466,76 @@ begin
 
 
 	-- Add user logic here
+	
+	dds_reset <= not slv_reg2(0);
 
-your_instance_name : dds_compiler_0
+adc : dds_compiler_0
   PORT MAP (
     aclk => s_axi_aclk,
-    aresetn => '1',
+    aresetn => dds_reset,
     s_axis_phase_tvalid => '1',
     s_axis_phase_tdata => slv_reg0,
-    m_axis_data_tvalid => m_axis_tvalid,
-    m_axis_data_tdata => m_axis_tdata
+    m_axis_data_tvalid => adc_tvalid,
+    m_axis_data_tdata => adc_tdata
   );
+  
+  adc_tdata_concat <= x"0000" & adc_tdata;
+  
+tuner : dds_compiler_1
+  PORT MAP (
+    aclk => s_axi_aclk,
+    aresetn => dds_reset,
+    s_axis_phase_tvalid => '1',
+    s_axis_phase_tdata => slv_reg1,
+    m_axis_data_tvalid => tuner_tvalid,
+    m_axis_data_tdata => tuner_tdata
+  );
+  
+mult : cmpy_0
+    PORT MAP (
+    aclk => s_axi_aclk,
+    aresetn => '1',
+    s_axis_a_tvalid => tuner_tvalid,
+    s_axis_a_tdata => tuner_tdata,
+    s_axis_b_tvalid => adc_tvalid,
+    s_axis_b_tdata => adc_tdata_concat,
+    m_axis_dout_tvalid => mult_tvalid,
+    m_axis_dout_tdata => mult_tdata
+  );
+  
+fir0 : filter_1
+  PORT MAP (
+    aclk => s_axi_aclk,
+    s_axis_data_tvalid => mult_tvalid,
+    s_axis_data_tready => fir0_tready,
+    s_axis_data_tdata => mult_tdata,
+    m_axis_data_tvalid => fir0_tvalid,
+    m_axis_data_tdata => fir0_tdata
+  );
+  
+fir1 : filter_2
+  PORT MAP (
+    aclk => s_axi_aclk,
+    s_axis_data_tvalid => fir0_tvalid,
+    s_axis_data_tready => fir1_tready,
+    s_axis_data_tdata => fir0_tdata,
+    m_axis_data_tvalid => fir1_tvalid,
+    m_axis_data_tdata => fir1_tdata
+  );
+  
+  process(S_AXI_ACLK)
+    begin
+      if rising_edge(S_AXI_ACLK) then
+        if S_AXI_ARESETN = '0' then
+          timer_cnt <= (others => '0');
+        else
+          timer_cnt <= timer_cnt + 1;
+        end if;
+      end if;
+    end process;
+  
+  m_axis_tdata  <= fir1_tdata;
+  m_axis_tvalid <= fir1_tvalid;
 
 
 	-- User logic ends
